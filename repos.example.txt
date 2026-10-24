@@ -1,0 +1,3 @@
+# One public repo URL per line. Replace these with the teams' submissions.
+https://github.com/TEAM-NIBBLE/Alavia-AI
+https://github.com/octocat/Hello-World
