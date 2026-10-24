@@ -1,12 +1,12 @@
 {
   "criteria": [
-    {"key": "working_demo", "name": "Working demo", "weight": 30,
-     "description": "The project actually works and can be shown live, not just described."},
     {"key": "usefulness", "name": "Usefulness for a fresher", "weight": 30,
      "description": "A new student would genuinely benefit from this, on campus or in study."},
+    {"key": "ease_of_use", "name": "Ease of use", "weight": 30,
+     "description": "A fresher can understand and use it in minutes, with no help: clear instructions, simple flow, no confusing steps."},
     {"key": "creativity", "name": "Creativity", "weight": 20,
      "description": "Original idea or a fresh angle on a known problem."},
-    {"key": "presentation", "name": "Presentation and README", "weight": 20,
-     "description": "Clear README that explains what it is, how to use it, and shows it working."}
+    {"key": "presentation", "name": "Presentation", "weight": 20,
+     "description": "Clear live presentation and README: the team shows the project working and explains it simply."}
   ]
 }

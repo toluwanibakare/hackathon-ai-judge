@@ -44,8 +44,9 @@ hour without a key), set `GITHUB_TOKEN` to raise it.
 ## Criteria
 
 Edit `criteria.json` to change criteria and weights. The default set is the
-fresher AI build day set: working demo (30), usefulness for a fresher (30),
-creativity (20), presentation and README (20).
+fresher AI build day set: usefulness for a fresher (30), ease of use (30),
+creativity (20), presentation (20). Working demo is not a separate
+criterion: teams prove it works in their live presentation.
 
 ## At the event
 
