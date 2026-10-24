@@ -48,9 +48,29 @@ fresher AI build day set: usefulness for a fresher (30), ease of use (30),
 creativity (20), presentation (20). Working demo is not a separate
 criterion: teams prove it works in their live presentation.
 
+## Form submissions mode (no GitHub needed)
+
+For freshers who do not know GitHub, collect submissions with a form
+instead of repos. Export the form responses as CSV and run:
+
+```
+python3 judge.py --submissions responses.csv --llm groq --out results.md
+```
+
+The CSV needs these columns (matched by header wording, so Google Forms
+question text works as-is): team name, member names, project name,
+project link, what it does, who it is for, how to use it. An example is
+in `submissions.example.csv`.
+
+The judge checks each project link (HEAD, then a short GET) and flags
+unreachable links in the report without disqualifying anyone on that
+alone. Scoring works the same as repo mode: full LLM scoring with Groq,
+or the pre-screen without a key.
+
 ## At the event
 
-1. Collect one repo URL per team into `repos.txt`.
+1. Collect one repo URL per team into `repos.txt`, or one form CSV export
+   with `--submissions`.
 2. Run the judge to get a ranked shortlist.
 3. Human judges try the demos of the shortlisted projects live and confirm
    the top 3. The AI judge proposes, humans decide.

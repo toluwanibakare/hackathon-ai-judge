@@ -19,6 +19,11 @@ How it works:
 Usage:
   python3 judge.py --repos repos.txt --criteria criteria.json --out results.md
   python3 judge.py https://github.com/owner/repo --llm none
+  python3 judge.py --submissions responses.csv --llm groq --out results.md
+
+Submissions mode reads a form export CSV (team, members, project, link,
+what it does, who it is for, how to use it), checks each project link, and
+scores each entry against the same criteria. No GitHub account needed.
 
 The AI judge proposes. Human judges decide. Always verify the top 3 by
 actually trying their demos before announcing winners.
@@ -26,6 +31,7 @@ actually trying their demos before announcing winners.
 
 import argparse
 import base64
+import csv
 import json
 import os
 import re
@@ -190,10 +196,41 @@ def llm_scores(repo, criteria, provider, api_key, model):
         return None
 
 
-def score_repo(repo, criteria, llm, api_key, model):
-    scores, evidence, notes = {}, {}, []
+def rule_submission_scores(sub):
+    """Transparent pre-screen for form submissions."""
+    what, who, how = sub["what"], sub["who"], sub["how"]
+    presentation = 0
+    if what:
+        presentation += 3
+    if who:
+        presentation += 2
+    if how:
+        presentation += 2
+    if len(what) + len(who) + len(how) > 200:
+        presentation += 1
+    if sub["link"]:
+        presentation += 1
+    if sub["link_ok"]:
+        presentation += 1
+    ease = 0
+    if how:
+        ease += 5
+    if re.search(r"step|\d\.|-|•", how.lower()):
+        ease += 3
+    if sub["link_ok"]:
+        ease += 2
+    return {
+        "presentation": min(10, presentation),
+        "ease_of_use": min(10, ease),
+    }
+
+
+def apply_scores(llm_project, measure_obj, criteria, llm, api_key, model, measured):
+    """Score one project. LLM mode scores every criterion; without a key the
+    rule based pre-screen scores only what can be measured."""
+    scores, evidence = {}, {}
     if llm in ("gemini", "groq") and api_key:
-        judged = llm_scores(repo, criteria, llm, api_key, model)
+        judged = llm_scores(llm_project, criteria, llm, api_key, model)
         if judged:
             for crit in criteria:
                 entry = judged.get("scores", {}).get(crit["key"], {})
@@ -202,27 +239,179 @@ def score_repo(repo, criteria, llm, api_key, model):
                 except (TypeError, ValueError):
                     scores[crit["key"]] = 0
                 evidence[crit["key"]] = entry.get("evidence", "")
-            notes.append(judged.get("summary", ""))
-            return scores, evidence, notes, "llm"
-    measured = rule_scores(repo)
+            return scores, evidence, [judged.get("summary", "")], "llm"
+    measured_scores = measured(measure_obj)
     for crit in criteria:
-        if crit["key"] in measured:
-            scores[crit["key"]] = measured[crit["key"]]
-            evidence[crit["key"]] = "Measured from README and repo data."
+        if crit["key"] in measured_scores:
+            scores[crit["key"]] = measured_scores[crit["key"]]
+            evidence[crit["key"]] = "Measured from the submission."
         else:
             scores[crit["key"]] = None
             evidence[crit["key"]] = "Needs a human judge or LLM scoring."
+    return scores, evidence, [], "pre-screen"
+
+
+def score_repo(repo, criteria, llm, api_key, model):
+    scores, evidence, notes, mode = apply_scores(repo, repo, criteria, llm, api_key, model, rule_scores)
     if not repo["readme"]:
         notes.append("No README found, so presentation scores 0.")
     if repo["readme_truncated"]:
         notes.append("README truncated to 12000 characters for scoring.")
-    return scores, evidence, notes, "pre-screen"
+    return scores, evidence, notes, mode
+
+
+def normalize_header(header):
+    return re.sub(r"[^a-z0-9]", "", (header or "").lower())
+
+
+def read_submissions(path):
+    """Read a form export CSV. Columns are matched by header wording, so
+    Google Forms question text works as-is. Returns a list of dicts."""
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        return []
+    field_map = {}
+    for raw in rows[0].keys():
+        norm = normalize_header(raw)
+        if "link" in norm or "url" in norm:
+            field_map["link"] = raw
+        elif "member" in norm:
+            field_map["members"] = raw
+        elif "what" in norm or "description" in norm or "does" in norm:
+            field_map["what"] = raw
+        elif "who" in norm or "audience" in norm:
+            field_map["who"] = raw
+        elif "how" in norm or "step" in norm or "use" in norm:
+            field_map["how"] = raw
+        elif "project" in norm:
+            field_map["project"] = raw
+        elif "team" in norm:
+            field_map["team"] = raw
+    submissions = []
+    for index, row in enumerate(rows, 1):
+        def get(key):
+            return (row.get(field_map[key]) or "").strip() if key in field_map else ""
+        link = get("link")
+        if link and not re.match(r"https?://", link):
+            link = "https://" + link
+        submissions.append({
+            "team": get("team") or "Team {}".format(index),
+            "members": get("members"),
+            "project": get("project") or "Untitled project",
+            "link": link,
+            "what": get("what"),
+            "who": get("who"),
+            "how": get("how"),
+        })
+    return submissions
+
+
+def check_link(url):
+    """Returns (ok, status_text). Tries HEAD, then a short GET, because some
+    hosts reject HEAD but serve GET fine. A failed check flags the entry, it
+    never disqualifies it on its own."""
+    if not url:
+        return False, "no link provided"
+    agent = {"User-Agent": "Mozilla/5.0 (hackathon-ai-judge)"}
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers=agent)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return True, "HTTP {}".format(resp.status)
+    except ValueError:
+        return False, "invalid link"
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        pass
+    try:
+        req = urllib.request.Request(url, method="GET", headers=agent)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read(1)
+            return True, "HTTP {}".format(resp.status)
+    except urllib.error.HTTPError as err:
+        return False, "HTTP {}".format(err.code)
+    except (urllib.error.URLError, ValueError):
+        return False, "unreachable"
+
+
+def score_submission(sub, criteria, llm, api_key, model):
+    combined = "What it does: {}\nWho it is for: {}\nHow to use it: {}\nLink check: {}".format(
+        sub["what"] or "(not provided)", sub["who"] or "(not provided)",
+        sub["how"] or "(not provided)", sub["link_status"])
+    project = {
+        "name": "{} ({})".format(sub["project"], sub["team"]),
+        "description": combined, "homepage": sub["link"], "language": "",
+        "files": [], "readme": combined, "link_ok": sub["link_ok"],
+    }
+    scores, evidence, notes, mode = apply_scores(
+        project, sub, criteria, llm, api_key, model, rule_submission_scores)
+    notes.append("Link: {} ({})".format(sub["link"] or "none", sub["link_status"]))
+    if not sub["what"]:
+        notes.append("No project description provided.")
+    return scores, evidence, notes, mode
+
+
+def run_submissions(args, criteria, llm, api_key, model):
+    subs = read_submissions(args.submissions)
+    if not subs:
+        raise SystemExit("No submissions found in {}.".format(args.submissions))
+    results = []
+    for sub in subs:
+        sub["link_ok"], sub["link_status"] = check_link(sub["link"])
+        scores, evidence, notes, mode = score_submission(sub, criteria, llm, api_key, model)
+        scored = [(c["weight"], scores[c["key"]]) for c in criteria if scores[c["key"]] is not None]
+        points = round(sum(w * s for w, s in scored) / 10, 1) if scored else 0
+        max_points = sum(w for w, _ in scored)
+        ratio = (points / max_points) if max_points else 0
+        results.append({
+            "sub": sub, "scores": scores, "evidence": evidence,
+            "notes": notes, "mode": mode, "points": points,
+            "max_points": max_points, "ratio": ratio,
+        })
+    results.sort(key=lambda r: r["ratio"], reverse=True)
+
+    print("\nRanked submissions (points out of measured criteria only):")
+    for rank, item in enumerate(results, 1):
+        mark = "  <-- TOP {}".format(rank) if rank <= args.top else ""
+        print("{}. {} - {} ({}/{}){}".format(
+            rank, item["sub"]["team"], item["sub"]["project"],
+            item["points"], item["max_points"], mark))
+    print("\nWinners:")
+    for rank, item in enumerate(results[: args.top], 1):
+        print("  {}. {} - {}".format(rank, item["sub"]["team"], item["sub"]["project"]))
+
+    lines = ["# Hackathon judging results (form submissions)\n"]
+    lines.append("Scored against: " + ", ".join(c["name"] for c in criteria) + "\n")
+    for rank, item in enumerate(results, 1):
+        sub = item["sub"]
+        lines.append("## {}. {} - {} ({}/{} points)".format(
+            rank, sub["team"], sub["project"], item["points"], item["max_points"]))
+        lines.append("- Members: {}".format(sub["members"] or "not listed"))
+        lines.append("- Link: {} ({})".format(sub["link"] or "none", sub["link_status"]))
+        lines.append("- Scoring mode: {}".format(item["mode"]))
+        for crit in criteria:
+            score = item["scores"][crit["key"]]
+            score_text = "{}/10".format(score) if score is not None else "not scored"
+            lines.append("- {} ({}): {} - {}".format(
+                crit["name"], score_text, item["evidence"][crit["key"]], crit["description"]))
+        for note in item["notes"]:
+            lines.append("- Note: {}".format(note))
+        lines.append("")
+    lines.append("Winners (top {}):".format(args.top))
+    for rank, item in enumerate(results[: args.top], 1):
+        lines.append("{}. {} - {}".format(rank, item["sub"]["team"], item["sub"]["project"]))
+    lines.append("\nThe AI judge proposes. Human judges decide. Verify the top 3 by trying their demos.")
+    with open(args.out, "w") as handle:
+        handle.write("\n".join(lines))
+    with open(os.path.splitext(args.out)[0] + ".json", "w") as handle:
+        json.dump(results, handle, indent=2)
+    print("\nReport written to {} (and JSON alongside it).".format(args.out))
 
 
 def main():
     parser = argparse.ArgumentParser(description="Hackathon AI judge: rank public repos, pick the top 3.")
     parser.add_argument("repos", nargs="*", help="Repo URLs (or owner/repo).")
     parser.add_argument("--repos-file", help="File with one repo URL per line (# comments allowed).")
+    parser.add_argument("--submissions", help="CSV export from a submission form (Google Forms). Runs submissions mode instead of repo mode.")
     parser.add_argument("--criteria", default="criteria.json", help="Criteria JSON file.")
     parser.add_argument("--llm", choices=["gemini", "groq", "none"], default="groq",
                         help="Scoring engine. groq needs GROQ_API_KEY, gemini needs GEMINI_API_KEY, else falls back.")
@@ -239,8 +428,8 @@ def main():
                 line = line.strip()
                 if line and not line.startswith("#"):
                     urls.append(line)
-    if not urls:
-        parser.error("Give at least one repo URL or a --repos-file.")
+    if not urls and not args.submissions:
+        parser.error("Give at least one repo URL, a --repos-file, or --submissions.")
 
     with open(args.criteria) as handle:
         criteria = json.load(handle)["criteria"]
@@ -257,7 +446,11 @@ def main():
         api_key, model = None, None
     if args.llm in ("gemini", "groq") and not api_key:
         key_name = "GROQ_API_KEY" if args.llm == "groq" else "GEMINI_API_KEY"
-        print("No {} set, using rule based pre-screen for all repos.".format(key_name), file=sys.stderr)
+        print("No {} set, using rule based pre-screen for all entries.".format(key_name), file=sys.stderr)
+
+    if args.submissions:
+        run_submissions(args, criteria, args.llm, api_key, model)
+        return
 
     results = []
     for url in urls:
